@@ -355,7 +355,7 @@
         }, 5000);
     }
     
-    // ========== SEND MESSAGE WITH CSRF TOKEN ==========
+    // ========== SEND MESSAGE WITH CSRF TOKEN (FIXED - NO DUPLICATES) ==========
     function sendMessage() {
         let message = messageInput.value.trim();
         
@@ -376,16 +376,17 @@
             const targetUser = sanitizeInput(privateMatch[1]);
             const privateMsg = sanitizeInput(privateMatch[2]);
             
-            // Send private message with CSRF token
+            // Send private message - NO local add (server will broadcast back)
             socket.emit('msg_user', targetUser, currentUsername, privateMsg, csrfToken);
-            addMessageToChat(currentUsername + ' → ' + targetUser, privateMsg, true);
+            // Message will appear when server sends msg_user_handle event
         } else {
-            // Public message with CSRF token
+            // Public message - NO local add (server will broadcast back)
             const sanitizedMessage = sanitizeInput(message);
             socket.emit('sendchat', sanitizedMessage, csrfToken);
-            addMessageToChat(currentUsername, sanitizedMessage);
+            // Message will appear when server sends updatechat event
         }
         
+        // Clear input field
         messageInput.value = '';
     }
     
