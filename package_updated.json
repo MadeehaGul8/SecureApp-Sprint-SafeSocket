@@ -1,0 +1,19 @@
+{
+  "name": "safesocket-chat-app",
+  "version": "2.0.0",
+  "description": "Secure Socket.IO Chat Application with IDOR, CSRF, Clickjacking fixes",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.6.1",
+    "helmet": "^7.0.0",
+    "express-rate-limit": "^6.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
