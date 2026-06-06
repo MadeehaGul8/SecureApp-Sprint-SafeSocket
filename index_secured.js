@@ -1,7 +1,15 @@
 "use strict";
 require('dotenv').config();
 
-
+/**
+ * SafeSocket - index_secured.js
+ * Member 2: Secure Developer
+ * D1: Secure Microservices Code
+ * D2: OAuth2/JWT + RBAC
+ * D3: AES-256-GCM + TLS 1.3
+ * D4: Kafka Event Streaming
+ * D5: Redis Secure Sessions
+ */
 
 const express   = require('express');
 const app       = express();
@@ -20,6 +28,15 @@ const { encrypt, decrypt, hashMessage } = require('./crypto-utils');
 
 // ── D4: Kafka ─────────────────────────────────────────────
 const kafka = require('./kafka');
+
+// ── D5: Redis Sessions ────────────────────────────────────
+const {
+    sessionMiddleware,
+    getStatus: getRedisStatus,
+    saveUserSession,
+    destroySession,
+    isValidSession
+} = require('./redis-session');
 
 // ══════════════════════════════════════════════════════════
 // D3: SERVER — HTTPS TLS 1.3 with HTTP fallback
@@ -57,7 +74,7 @@ app.use(helmet.contentSecurityPolicy({
 }));
 
 // ══════════════════════════════════════════════════════════
-// SRD-009: GLOBAL RATE LIMIT — 100 req / 15 min
+// SRD-009: GLOBAL RATE LIMIT
 // ══════════════════════════════════════════════════════════
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -67,7 +84,7 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // ══════════════════════════════════════════════════════════
-// SRD-013: LOGIN RATE LIMIT — 5 attempts / 5 min
+// SRD-013: LOGIN RATE LIMIT
 // ══════════════════════════════════════════════════════════
 const loginLimiter = rateLimit({
     windowMs: 5 * 60 * 1000,
@@ -78,6 +95,9 @@ const loginLimiter = rateLimit({
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use('/public', express.static('public'));
+
+// ── D5: Apply session middleware ──────────────────────────
+app.use(sessionMiddleware);
 
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/index_secured.html');
@@ -129,6 +149,85 @@ const check_key = v => {
 };
 
 // ══════════════════════════════════════════════════════════
+// D5: REDIS SESSION ENDPOINTS
+// ══════════════════════════════════════════════════════════
+
+// Redis status
+app.get('/api/session/status', (req, res) => {
+    res.json({
+        redis:       getRedisStatus(),
+        session:     isValidSession(req),
+        sessionId:   req.session?.id ? 'present' : 'none',
+        cookieName:  'safesocket.sid',
+    });
+});
+
+// Session login (stores in Redis)
+app.post('/api/session/login', loginLimiter, async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password required' });
+        }
+        const cleanUsername = username.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
+        if (cleanUsername.length < 3) {
+            return res.status(400).json({ error: 'Invalid username format' });
+        }
+
+        let userRole = 'user';
+        if (userStore[cleanUsername]) {
+            if (userStore[cleanUsername].password !== password) {
+                console.log(`[SECURITY] Failed session login for "${cleanUsername}"`);
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+            userRole = userStore[cleanUsername].role;
+        } else {
+            userStore[cleanUsername] = { password, role: 'user' };
+        }
+
+        // SRD-003: Save to Redis-backed session
+        saveUserSession(req, cleanUsername, userRole);
+
+        console.log(`[SESSION] Login: ${cleanUsername} → session ${req.session.id}`);
+
+        res.json({
+            message:    'Session created',
+            username:   cleanUsername,
+            role:       userRole,
+            sessionId:  'set (HttpOnly cookie)',
+            expiresIn:  '1 hour (SRD-020)',
+            cookieFlags:'HttpOnly, SameSite=Lax (SRD-004)',
+        });
+    } catch (err) {
+        console.error('[ERROR]', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Session logout
+app.post('/api/session/logout', async (req, res) => {
+    const username = req.session?.username;
+    await destroySession(req);
+    res.clearCookie('safesocket.sid');
+    console.log(`[SESSION] Logout: ${username}`);
+    res.json({ message: 'Session destroyed', loggedOut: username });
+});
+
+// Session profile (requires valid session)
+app.get('/api/session/profile', (req, res) => {
+    if (!isValidSession(req)) {
+        return res.status(401).json({ error: 'No active session' });
+    }
+    res.json({
+        username:  req.session.username,
+        role:      req.session.role,
+        loginAt:   new Date(req.session.loginAt).toISOString(),
+        ip:        req.session.ip,
+        sessionId: 'hidden (HttpOnly)',
+    });
+});
+
+// ══════════════════════════════════════════════════════════
 // D3: ENCRYPTION TEST ENDPOINT
 // ══════════════════════════════════════════════════════════
 app.get('/api/crypto/test', (req, res) => {
@@ -154,7 +253,7 @@ app.get('/api/crypto/test', (req, res) => {
     }
 });
 
-// D3: KEY ROTATION ENDPOINT (admin only)
+// D3: KEY ROTATION (admin only)
 app.post('/api/crypto/rotate-key', requirePermission('manage_users'), (req, res) => {
     const { generateNewKey } = require('./crypto-utils');
     const newKey = generateNewKey();
@@ -167,15 +266,12 @@ app.post('/api/crypto/rotate-key', requirePermission('manage_users'), (req, res)
 });
 
 // ══════════════════════════════════════════════════════════
-// D4: KAFKA STATUS ENDPOINT
-// GET /api/kafka/status
+// D4: KAFKA ENDPOINTS
 // ══════════════════════════════════════════════════════════
 app.get('/api/kafka/status', (req, res) => {
     res.json(kafka.getStatus());
 });
 
-// D4: KAFKA TEST PUBLISH ENDPOINT
-// POST /api/kafka/publish
 app.post('/api/kafka/publish', requirePermission('write'), async (req, res) => {
     try {
         const { room, message } = req.body;
@@ -186,16 +282,15 @@ app.post('/api/kafka/publish', requirePermission('write'), async (req, res) => {
             room, req.user.sub, sanitizeInput(message), 'public'
         );
         res.json({
-            published:  published,
-            via:        published ? 'kafka' : 'fallback',
-            room:       room,
-            from:       req.user.sub,
-            message:    sanitizeInput(message),
-            timestamp:  new Date().toISOString(),
+            published:   published,
+            via:         published ? 'kafka' : 'fallback',
+            room, from:  req.user.sub,
+            message:     sanitizeInput(message),
+            timestamp:   new Date().toISOString(),
             kafkaStatus: kafka.getStatus()
         });
     } catch (err) {
-        res.status(500).json({ error: 'Publish failed', details: err.message });
+        res.status(500).json({ error: 'Publish failed' });
     }
 });
 
@@ -238,9 +333,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     }
 });
 
-// ══════════════════════════════════════════════════════════
-// D2: TOKEN VERIFY ENDPOINT
-// ══════════════════════════════════════════════════════════
+// D2: TOKEN VERIFY
 app.get('/api/auth/verify', (req, res) => {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -260,9 +353,7 @@ app.get('/api/auth/verify', (req, res) => {
     });
 });
 
-// ══════════════════════════════════════════════════════════
-// D2: RBAC PROTECTED ROUTES
-// ══════════════════════════════════════════════════════════
+// D2: RBAC ROUTES
 app.get('/api/chat/history', requirePermission('read'), (req, res) => {
     res.json({ messages: messageHistory, count: messageHistory.length, user: req.user.sub, role: req.user.role });
 });
@@ -288,7 +379,7 @@ app.use((err, req, res, next) => {
 });
 
 // ══════════════════════════════════════════════════════════
-// SOCKET.IO — REAL-TIME CHAT
+// SOCKET.IO
 // ══════════════════════════════════════════════════════════
 io.on('connection', socket => {
     console.log(`[INFO] New connection: ${socket.id}`);
@@ -310,21 +401,11 @@ io.on('connection', socket => {
         return true;
     };
 
-    // ── ADD USER ──────────────────────────────────────────
     socket.on('adduser', (username, token) => {
-        if (!verifyCsrfToken(socket.id, token)) {
-            socket.emit('error', 'Invalid CSRF token');
-            return;
-        }
+        if (!verifyCsrfToken(socket.id, token)) { socket.emit('error', 'Invalid CSRF token'); return; }
         username = sanitizeInput(username);
-        if (!username || username.length < 3 || username.length > 20) {
-            socket.emit('error', 'Invalid username');
-            return;
-        }
-        if (usernames[username]) {
-            socket.emit('error', 'Username already taken');
-            return;
-        }
+        if (!username || username.length < 3 || username.length > 20) { socket.emit('error', 'Invalid username'); return; }
+        if (usernames[username]) { socket.emit('error', 'Username already taken'); return; }
         socket.username     = username;
         usernames[username] = socket.id;
         userRooms.set(username, [`user_${username}`]);
@@ -333,68 +414,29 @@ io.on('connection', socket => {
         socket.emit('csrf_token', generateCsrfToken(socket.id));
     });
 
-    // ── PUBLIC MESSAGE (D4: Kafka routing) ───────────────
     socket.on('sendchat', async (data, token) => {
-        if (!verifyCsrfToken(socket.id, token)) {
-            socket.emit('error', 'Invalid CSRF token');
-            return;
-        }
+        if (!verifyCsrfToken(socket.id, token)) { socket.emit('error', 'Invalid CSRF token'); return; }
         if (!checkRateLimit()) return;
-        if (typeof data !== 'string' || data.length > 10240) {
-            socket.emit('error', 'Message too large');
-            return;
-        }
-
+        if (typeof data !== 'string' || data.length > 10240) { socket.emit('error', 'Message too large'); return; }
         const sanitizedData = sanitizeInput(data);
-
-        // D4: Try Kafka first — fallback to direct Socket.IO emit
-        const published = await kafka.publishMessage(
-            'public', socket.username, sanitizedData, 'public'
-        );
-
-        if (!published) {
-            // Kafka unavailable — direct emit fallback
-            io.emit('updatechat', socket.username, sanitizedData);
-        }
-
-        // Store in history
-        messageHistory.push({
-            timestamp: new Date().toISOString(),
-            user:      socket.username,
-            message:   sanitizedData,
-            via:       published ? 'kafka' : 'direct'
-        });
+        const published = await kafka.publishMessage('public', socket.username, sanitizedData, 'public');
+        if (!published) { io.emit('updatechat', socket.username, sanitizedData); }
+        messageHistory.push({ timestamp: new Date().toISOString(), user: socket.username, message: sanitizedData, via: published ? 'kafka' : 'direct' });
         if (messageHistory.length > 100) messageHistory.shift();
     });
 
-    // ── PRIVATE MESSAGE ───────────────────────────────────
     socket.on('msg_user', (to_user, from_user, msg, token) => {
-        if (!verifyCsrfToken(socket.id, token)) {
-            socket.emit('error', 'Invalid CSRF token');
-            return;
-        }
+        if (!verifyCsrfToken(socket.id, token)) { socket.emit('error', 'Invalid CSRF token'); return; }
         if (!checkRateLimit()) return;
-        if (socket.username !== from_user) {
-            console.log(`[SECURITY] Spoofing attempt by ${socket.id}`);
-            socket.emit('error', 'Unauthorized: Cannot send messages as another user');
-            return;
-        }
-        if (!usernames[to_user]) {
-            socket.emit('error', 'User not found');
-            return;
-        }
-        if (typeof msg !== 'string' || msg.length > 10240) {
-            socket.emit('error', 'Message too large');
-            return;
-        }
+        if (socket.username !== from_user) { socket.emit('error', 'Unauthorized'); return; }
+        if (!usernames[to_user]) { socket.emit('error', 'User not found'); return; }
+        if (typeof msg !== 'string' || msg.length > 10240) { socket.emit('error', 'Message too large'); return; }
         const sanitizedMsg = sanitizeInput(msg);
         const allowedUsers = userRooms.get(from_user) || [];
         if (!allowedUsers.includes(`user_${to_user}`) && from_user !== to_user) {
             userRooms.set(from_user, [...allowedUsers, `user_${to_user}`]);
         }
         io.to(usernames[to_user]).emit('msg_user_handle', from_user, sanitizedMsg);
-
-        // D3: Encrypt before storing
         try {
             const encryptedMsg = encrypt(sanitizedMsg);
             const msgHash      = hashMessage(sanitizedMsg);
@@ -406,16 +448,11 @@ io.on('connection', socket => {
         }
     });
 
-    // ── CHECK USER ────────────────────────────────────────
     socket.on('check_user', (asker, id) => {
-        if (socket.username !== asker) {
-            socket.emit('error', 'Unauthorized');
-            return;
-        }
+        if (socket.username !== asker) { socket.emit('error', 'Unauthorized'); return; }
         io.to(usernames[asker]).emit('msg_user_found', check_key(id));
     });
 
-    // ── DISCONNECT ────────────────────────────────────────
     socket.on('disconnect', () => {
         if (socket.username) {
             delete usernames[socket.username];
@@ -427,12 +464,10 @@ io.on('connection', socket => {
 });
 
 // ══════════════════════════════════════════════════════════
-// D4: Connect Kafka (non-blocking — graceful fallback)
+// D4: Connect Kafka
 // ══════════════════════════════════════════════════════════
 kafka.connect().then(() => {
-    if (kafka.getStatus().connected) {
-        kafka.startConsumer(io);
-    }
+    if (kafka.getStatus().connected) kafka.startConsumer(io);
 });
 
 // ══════════════════════════════════════════════════════════
@@ -443,14 +478,13 @@ const PORT = Number(process.env.PORT || 3000);
 const startServer = (port) => {
     server.listen(port, () => {
         console.log(`\n🔒 SafeSocket secure server listening on *:${port}`);
-        console.log(`[D2] JWT Auth    → http://localhost:${port}/api/auth/login`);
-        console.log(`[D2] Verify      → http://localhost:${port}/api/auth/verify`);
-        console.log(`[D2] History     → http://localhost:${port}/api/chat/history`);
-        console.log(`[D2] Admin       → http://localhost:${port}/api/admin/users`);
-        console.log(`[D3] Crypto      → http://localhost:${port}/api/crypto/test`);
-        console.log(`[D3] Key Rotate  → http://localhost:${port}/api/crypto/rotate-key`);
-        console.log(`[D4] Kafka Status→ http://localhost:${port}/api/kafka/status`);
-        console.log(`[D4] Kafka Pub   → http://localhost:${port}/api/kafka/publish\n`);
+        console.log(`[D2] JWT Auth     → http://localhost:${port}/api/auth/login`);
+        console.log(`[D2] Verify       → http://localhost:${port}/api/auth/verify`);
+        console.log(`[D3] Crypto Test  → http://localhost:${port}/api/crypto/test`);
+        console.log(`[D4] Kafka Status → http://localhost:${port}/api/kafka/status`);
+        console.log(`[D5] Redis Status → http://localhost:${port}/api/session/status`);
+        console.log(`[D5] Sess Login   → http://localhost:${port}/api/session/login`);
+        console.log(`[D5] Sess Profile → http://localhost:${port}/api/session/profile\n`);
     });
 };
 
