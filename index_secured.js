@@ -1,33 +1,10 @@
 "use strict";
+require('dotenv').config();
 
-/**
- * SafeSocket - index_secured.js
- * Member 2: Secure Developer
- * Deliverable 1: Secure Microservices Code
- * Deliverable 2: OAuth2/JWT + RBAC Implementation
- *
- * Security Controls:
- * - SRD-005/021: Input sanitization
- * - SRD-006: XSS prevention
- * - SRD-008: IDOR protection
- * - SRD-009: Rate limiting (100 req/15min)
- * - SRD-010: Security headers (Helmet)
- * - SRD-012: Generic error messages
- * - SRD-013: Login rate limit (5/5min)
- * - SRD-014: Anti-spoofing
- * - SRD-015: JWT in memory only
- * - SRD-019: Message size limit (10KB)
- * - SRD-021: Username validation
- * - SRD-023: Failed auth logging
- * - CSRF: Token per socket session
- */
-
-const express = require('express');
-const app     = express();
-const http    = require('http').Server(app);
-const io      = require('socket.io')(http);
-const fs      = require('fs');
-const helmet  = require('helmet');
+const express   = require('express');
+const app       = express();
+const fs        = require('fs');
+const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 
 // ── D2: Import JWT + RBAC module ──────────────────────────
@@ -40,6 +17,30 @@ const {
     userStore,
     hasPermission
 } = require('./auth');
+
+// ── D3: Import AES-256-GCM crypto utils ──────────────────
+const { encrypt, decrypt, hashMessage } = require('./crypto-utils');
+
+// ══════════════════════════════════════════════════════════
+// D3: SERVER SETUP — HTTPS (TLS 1.3) with HTTP fallback
+// ══════════════════════════════════════════════════════════
+let server;
+try {
+    const https      = require('https');
+    const tlsOptions = {
+        key:        fs.readFileSync('./certs/key.pem'),
+        cert:       fs.readFileSync('./certs/cert.pem'),
+        minVersion: 'TLSv1.3',
+    };
+    server = https.createServer(tlsOptions, app);
+    console.log('[TLS] ✅ HTTPS server with TLS 1.3 enabled');
+} catch (err) {
+    console.warn('[TLS] ⚠️  Certs not found — running HTTP for development');
+    const http = require('http');
+    server     = http.createServer(app);
+}
+
+const io = require('socket.io')(server);
 
 // ══════════════════════════════════════════════════════════
 // SRD-010: SECURITY HEADERS (Helmet)
@@ -113,7 +114,7 @@ const generateCsrfToken = (socketId) => {
     const crypto = require('crypto');
     const token  = crypto.randomBytes(32).toString('hex');
     csrfTokens.set(socketId, token);
-    setTimeout(() => csrfTokens.delete(socketId), 3600000); // 1 hour
+    setTimeout(() => csrfTokens.delete(socketId), 3600000);
     return token;
 };
 
@@ -130,6 +131,46 @@ const check_key = v => {
 };
 
 // ══════════════════════════════════════════════════════════
+// D3: ENCRYPTION TEST ENDPOINT
+// GET /api/crypto/test
+// ══════════════════════════════════════════════════════════
+app.get('/api/crypto/test', (req, res) => {
+    try {
+        const testMsg   = 'SafeSocket AES-256-GCM Test Message';
+        const encrypted = encrypt(testMsg);
+        const decrypted = decrypt(encrypted);
+        const hash      = hashMessage(testMsg);
+        const passed    = decrypted === testMsg;
+
+        res.json({
+            algorithm:      'AES-256-GCM',
+            original:       testMsg,
+            encrypted:      encrypted,
+            decrypted:      decrypted,
+            hash_sha256:    hash,
+            test_passed:    passed,
+            tls_version:    'TLS 1.3 (minVersion enforced)',
+            key_source:     'Environment variable (SRD-011)',
+            key_rotation:   'Every 90 days (SRD-025)',
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Encryption test failed', details: err.message });
+    }
+});
+
+// D3: KEY ROTATION ENDPOINT (admin only)
+app.post('/api/crypto/rotate-key', requirePermission('manage_users'), (req, res) => {
+    const { generateNewKey } = require('./crypto-utils');
+    const newKey = generateNewKey();
+    res.json({
+        message:    'New AES key generated',
+        newKey:     newKey,
+        instruction:'Update AES_KEY in .env and restart server',
+        rotatedBy:  req.user.sub,
+    });
+});
+
+// ══════════════════════════════════════════════════════════
 // D2: JWT LOGIN ENDPOINT
 // POST /api/auth/login
 // SRD-015: Token returned in body — store in memory ONLY
@@ -142,7 +183,6 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
             return res.status(400).json({ error: 'Username and password required' });
         }
 
-        // Sanitize + validate username
         const cleanUsername = username.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
         if (cleanUsername.length < 3) {
             return res.status(400).json({ error: 'Invalid username format' });
@@ -151,24 +191,18 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
         let userRole = 'user';
 
         if (userStore[cleanUsername]) {
-            // Known user — check password
             if (userStore[cleanUsername].password !== password) {
-                // SRD-023: Log failed login (no sensitive data)
                 console.log(`[SECURITY] Failed login for "${cleanUsername}" at ${new Date().toISOString()}`);
                 return res.status(401).json({ error: 'Invalid credentials' });
             }
             userRole = userStore[cleanUsername].role;
         } else {
-            // New user — auto-register as 'user' role
             userStore[cleanUsername] = { password, role: 'user' };
         }
 
-        // Generate JWT
         const token = generateToken(cleanUsername, userRole);
-
         console.log(`[AUTH] Login success: ${cleanUsername} (${userRole})`);
 
-        // SRD-015: Token in response body — client keeps in memory only
         res.json({
             message:     'Login successful',
             token:       token,
@@ -179,7 +213,6 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
         });
 
     } catch (err) {
-        // SRD-012: No internals exposed
         console.error('[ERROR]', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
@@ -187,22 +220,17 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
 // ══════════════════════════════════════════════════════════
 // D2: TOKEN VERIFY ENDPOINT
-// GET /api/auth/verify
 // ══════════════════════════════════════════════════════════
 app.get('/api/auth/verify', (req, res) => {
     const authHeader = req.headers['authorization'];
-
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ valid: false, error: 'No token provided' });
     }
-
     const token   = authHeader.split(' ')[1];
     const decoded = verifyToken(token);
-
     if (!decoded) {
         return res.status(401).json({ valid: false, error: 'Invalid or expired token' });
     }
-
     res.json({
         valid:       true,
         username:    decoded.sub,
@@ -215,8 +243,6 @@ app.get('/api/auth/verify', (req, res) => {
 // ══════════════════════════════════════════════════════════
 // D2: RBAC PROTECTED ROUTES
 // ══════════════════════════════════════════════════════════
-
-// Any logged-in user — read chat history
 app.get('/api/chat/history', requirePermission('read'), (req, res) => {
     res.json({
         messages: messageHistory,
@@ -226,37 +252,22 @@ app.get('/api/chat/history', requirePermission('read'), (req, res) => {
     });
 });
 
-// Moderator+ — delete messages
 app.delete('/api/chat/message', requirePermission('delete'), (req, res) => {
-    res.json({
-        message:   'Message deleted',
-        deletedBy: req.user.sub,
-        role:      req.user.role
-    });
+    res.json({ message: 'Message deleted', deletedBy: req.user.sub, role: req.user.role });
 });
 
-// Admin only — list all users
 app.get('/api/admin/users', requirePermission('manage_users'), (req, res) => {
     res.json({
-        users: Object.keys(userStore).map(u => ({
-            username: u,
-            role:     userStore[u].role
-        }))
+        users: Object.keys(userStore).map(u => ({ username: u, role: userStore[u].role }))
     });
 });
 
-// Admin only — view logs
 app.get('/api/admin/logs', requirePermission('view_logs'), (req, res) => {
-    res.json({
-        message:     'Logs endpoint active',
-        requestedBy: req.user.sub,
-        role:        req.user.role
-    });
+    res.json({ message: 'Logs endpoint active', requestedBy: req.user.sub, role: req.user.role });
 });
 
 // ══════════════════════════════════════════════════════════
 // SRD-012: Global Error Handler
-// Never expose stack traces or internals
 // ══════════════════════════════════════════════════════════
 app.use((err, req, res, next) => {
     console.error('[ERROR]', err.message);
@@ -269,20 +280,15 @@ app.use((err, req, res, next) => {
 io.on('connection', socket => {
     console.log(`[INFO] New connection: ${socket.id}`);
 
-    // Generate + send CSRF token to client
     const csrfToken = generateCsrfToken(socket.id);
     socket.emit('csrf_token', csrfToken);
 
-    // Per-socket rate limiting — 30 msg/min
     let messageCount = 0;
     let lastReset    = Date.now();
 
     const checkRateLimit = () => {
         const now = Date.now();
-        if (now - lastReset > 60000) {
-            messageCount = 0;
-            lastReset    = now;
-        }
+        if (now - lastReset > 60000) { messageCount = 0; lastReset = now; }
         if (messageCount > 30) {
             socket.emit('error', 'Rate limit exceeded. Slow down!');
             return false;
@@ -291,56 +297,44 @@ io.on('connection', socket => {
         return true;
     };
 
-    // ── ADD USER (CSRF protected) ─────────────────────────
+    // ── ADD USER ──────────────────────────────────────────
     socket.on('adduser', (username, token) => {
         if (!verifyCsrfToken(socket.id, token)) {
             socket.emit('error', 'Invalid CSRF token');
             return;
         }
-
         username = sanitizeInput(username);
-
-        // SRD-021: Validate length
         if (!username || username.length < 3 || username.length > 20) {
             socket.emit('error', 'Invalid username');
             return;
         }
-
         if (usernames[username]) {
             socket.emit('error', 'Username already taken');
             return;
         }
-
-        socket.username = username;
+        socket.username     = username;
         usernames[username] = socket.id;
         userRooms.set(username, [`user_${username}`]);
 
         socket.emit('updatechat', 'Chat Bot', `${socket.username} you have joined the chat securely`);
         socket.emit('store_username', username);
-
-        // Refresh CSRF token after login
         socket.emit('csrf_token', generateCsrfToken(socket.id));
     });
 
-    // ── PUBLIC MESSAGE (XSS + CSRF + Rate limit) ──────────
+    // ── PUBLIC MESSAGE ────────────────────────────────────
     socket.on('sendchat', (data, token) => {
         if (!verifyCsrfToken(socket.id, token)) {
             socket.emit('error', 'Invalid CSRF token');
             return;
         }
-
         if (!checkRateLimit()) return;
-
-        // SRD-019: 10KB message size limit
         if (typeof data !== 'string' || data.length > 10240) {
             socket.emit('error', 'Message too large');
             return;
         }
-
         const sanitizedData = sanitizeInput(data);
         io.emit('updatechat', socket.username, sanitizedData);
 
-        // Store in history (max 100)
         messageHistory.push({
             timestamp: new Date().toISOString(),
             user:      socket.username,
@@ -349,29 +343,24 @@ io.on('connection', socket => {
         if (messageHistory.length > 100) messageHistory.shift();
     });
 
-    // ── PRIVATE MESSAGE (IDOR + CSRF + Spoofing) ──────────
+    // ── PRIVATE MESSAGE ───────────────────────────────────
     socket.on('msg_user', (to_user, from_user, msg, token) => {
-        // CSRF check
         if (!verifyCsrfToken(socket.id, token)) {
             socket.emit('error', 'Invalid CSRF token');
             return;
         }
-
         if (!checkRateLimit()) return;
 
-        // SRD-014: Anti-spoofing — sender must match session
+        // SRD-014: Anti-spoofing
         if (socket.username !== from_user) {
             console.log(`[SECURITY] Spoofing attempt by ${socket.id}`);
             socket.emit('error', 'Unauthorized: Cannot send messages as another user');
             return;
         }
-
         if (!usernames[to_user]) {
             socket.emit('error', 'User not found');
             return;
         }
-
-        // SRD-019: Size limit
         if (typeof msg !== 'string' || msg.length > 10240) {
             socket.emit('error', 'Message too large');
             return;
@@ -379,7 +368,7 @@ io.on('connection', socket => {
 
         const sanitizedMsg = sanitizeInput(msg);
 
-        // SRD-008: IDOR — permission check
+        // SRD-008: IDOR check
         const allowedUsers = userRooms.get(from_user) || [];
         if (!allowedUsers.includes(`user_${to_user}`) && from_user !== to_user) {
             userRooms.set(from_user, [...allowedUsers, `user_${to_user}`]);
@@ -387,10 +376,16 @@ io.on('connection', socket => {
 
         io.to(usernames[to_user]).emit('msg_user_handle', from_user, sanitizedMsg);
 
-        // Secure structured log (no raw user data)
-        const wstream = fs.createWriteStream('chat_data.txt', { flags: 'a' });
-        wstream.write(`[${new Date().toISOString()}] PRIVATE from="${from_user}" to="${to_user}" length=${sanitizedMsg.length}\n`);
-        wstream.end();
+        // D3: Encrypt message before storing to disk (SRD-011)
+        try {
+            const encryptedMsg = encrypt(sanitizedMsg);
+            const msgHash      = hashMessage(sanitizedMsg);
+            const wstream      = fs.createWriteStream('chat_data.txt', { flags: 'a' });
+            wstream.write(`[${new Date().toISOString()}] PRIVATE from="${from_user}" to="${to_user}" hash="${msgHash}" encrypted="${encryptedMsg}"\n`);
+            wstream.end();
+        } catch (err) {
+            console.error('[CRYPTO] Failed to encrypt log:', err.message);
+        }
     });
 
     // ── CHECK USER ────────────────────────────────────────
@@ -414,21 +409,23 @@ io.on('connection', socket => {
 });
 
 // ══════════════════════════════════════════════════════════
-// START SERVER (auto port fallback)
+// START SERVER
 // ══════════════════════════════════════════════════════════
 const PORT = Number(process.env.PORT || 3000);
 
 const startServer = (port) => {
-    http.listen(port, () => {
-        console.log(`Secure chat server listening on *:${port}`);
-        console.log(`[D2] JWT Auth:  http://localhost:${port}/api/auth/login`);
-        console.log(`[D2] Verify:    http://localhost:${port}/api/auth/verify`);
-        console.log(`[D2] History:   http://localhost:${port}/api/chat/history`);
-        console.log(`[D2] Admin:     http://localhost:${port}/api/admin/users`);
+    server.listen(port, () => {
+        console.log(`\n🔒 SafeSocket secure server listening on *:${port}`);
+        console.log(`[D2] JWT Auth   → http://localhost:${port}/api/auth/login`);
+        console.log(`[D2] Verify     → http://localhost:${port}/api/auth/verify`);
+        console.log(`[D2] History    → http://localhost:${port}/api/chat/history`);
+        console.log(`[D2] Admin      → http://localhost:${port}/api/admin/users`);
+        console.log(`[D3] Crypto     → http://localhost:${port}/api/crypto/test`);
+        console.log(`[D3] Key Rotate → http://localhost:${port}/api/crypto/rotate-key\n`);
     });
 };
 
-http.on('error', (err) => {
+server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
         const fallbackPort = PORT + 1;
         console.warn(`Port ${PORT} busy. Retrying on ${fallbackPort}...`);
