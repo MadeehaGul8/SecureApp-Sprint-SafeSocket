@@ -31,7 +31,7 @@ app.use('/api/', limiter);
 app.use('/public', express.static('public'));
 
 app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
+    res.sendFile(__dirname + '/index_secured.html');
 });
 
 // ========== STORAGE ==========
@@ -210,4 +210,22 @@ io.on('connection', socket => {
     });
 });
 
-http.listen(3000, () => console.log('Secure chat server listening on *:3000'));
+const PORT = Number(process.env.PORT || 3000);
+
+const startServer = (port) => {
+    http.listen(port, () => {
+        console.log(`Secure chat server listening on *:${port}`);
+    });
+};
+
+http.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        const fallbackPort = PORT + 1;
+        console.warn(`Port ${PORT} is busy. Retrying on ${fallbackPort}...`);
+        startServer(fallbackPort);
+        return;
+    }
+    throw err;
+});
+
+startServer(PORT);

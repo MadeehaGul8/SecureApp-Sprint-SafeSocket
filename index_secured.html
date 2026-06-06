@@ -3,15 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <title>SafeSocket - Secure Chat Application</title>
-    
-    <!-- SECURITY FIX: Clickjacking prevention -->
-    <meta http-equiv="X-Frame-Options" content="DENY">
-    <meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'">
-    
+
     <link rel='stylesheet prefetch' href='https://fonts.googleapis.com/css?family=Open+Sans'>
     
     <style>
-        /* Embedded CSS - Prevents external tampering */
         * {
             box-sizing: border-box;
         }
@@ -38,6 +33,16 @@
         .chat-title h1 {
             font-size: 18px;
             margin: 0;
+        }
+        /* ── Security Badge ── */
+        .security-badge {
+            background: #27ae60;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 11px;
+            margin-left: 10px;
+            padding: 2px 8px;
+            vertical-align: middle;
         }
         .avatar {
             position: absolute;
@@ -70,6 +75,8 @@
             border-radius: 10px;
             display: inline-block;
             padding: 8px 12px;
+            max-width: 80%;
+            word-wrap: break-word;
         }
         .my-message {
             text-align: right;
@@ -77,10 +84,19 @@
         .my-message .message-text {
             background: #2c8392;
         }
+        .system-message .message-text {
+            background: #27ae60;
+            font-size: 13px;
+        }
+        .private-message .message-text {
+            background: #8e44ad;
+            border: 1px solid #9b59b6;
+        }
         .message-box {
             background: #1a2a36;
             display: flex;
             padding: 15px 20px;
+            align-items: flex-end;
         }
         .message-input {
             background: #2d3e4b;
@@ -92,6 +108,10 @@
             padding: 12px;
             resize: none;
             font-family: inherit;
+            font-size: 14px;
+        }
+        .message-input:focus {
+            outline: 2px solid #2c8392;
         }
         .message-submit {
             background: #2c8392;
@@ -99,10 +119,25 @@
             border-radius: 5px;
             color: #fff;
             cursor: pointer;
-            padding: 0 20px;
+            padding: 12px 20px;
+            font-size: 14px;
         }
         .message-submit:hover {
             background: #3da5b8;
+        }
+        /* ── Character counter ── */
+        .char-counter {
+            color: #aaa;
+            font-size: 11px;
+            padding: 4px 20px;
+            text-align: right;
+            background: #1a2a36;
+        }
+        .char-counter.warning {
+            color: #e67e22;
+        }
+        .char-counter.danger {
+            color: #e74c3c;
         }
         .online-bullet {
             background: #4caf50;
@@ -112,6 +147,7 @@
             margin-left: 10px;
             width: 10px;
         }
+        /* ── Login overlay ── */
         .login-overlay {
             background: rgba(0,0,0,0.95);
             height: 100%;
@@ -129,20 +165,31 @@
             border-radius: 10px;
             padding: 30px;
             text-align: center;
-            width: 320px;
+            width: 340px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         }
         .login-box h2 {
             color: #fff;
+            margin-bottom: 6px;
+        }
+        .login-box .subtitle {
+            color: #aaa;
+            font-size: 12px;
             margin-bottom: 20px;
         }
         .login-box input {
             background: #1a2a36;
-            border: none;
+            border: 1px solid #3a5068;
             border-radius: 5px;
             color: #fff;
             padding: 12px;
             width: 100%;
             margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .login-box input:focus {
+            outline: none;
+            border-color: #2c8392;
         }
         .login-box button {
             background: #2c8392;
@@ -152,6 +199,7 @@
             cursor: pointer;
             padding: 12px;
             width: 100%;
+            font-size: 15px;
         }
         .login-box button:hover {
             background: #3da5b8;
@@ -159,263 +207,408 @@
         .error-message {
             color: #e74c3c;
             margin-top: 10px;
-            font-size: 14px;
+            font-size: 13px;
+            min-height: 18px;
+        }
+        /* ── Security features list ── */
+        .security-features {
+            background: #1a2a36;
+            border-radius: 6px;
+            margin-top: 16px;
+            padding: 10px 14px;
+            text-align: left;
+        }
+        .security-features p {
+            color: #aaa;
+            font-size: 11px;
+            margin: 0 0 6px 0;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .security-features span {
+            color: #27ae60;
+            display: block;
+            font-size: 12px;
+            margin-bottom: 3px;
         }
         .private-hint {
             color: #aaa;
             font-size: 12px;
             margin-top: 10px;
-            text-align: center;
+        }
+        /* ── Rate limit warning ── */
+        .rate-warning {
+            background: #e67e22;
+            border-radius: 4px;
+            color: #fff;
+            display: none;
+            font-size: 12px;
+            margin: 4px 20px;
+            padding: 6px 12px;
+        }
+        /* ── User info bar ── */
+        .user-info-bar {
+            background: #243747;
+            color: #aaa;
+            font-size: 12px;
+            padding: 6px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .user-info-bar .username-display {
+            color: #2c8392;
+            font-weight: bold;
+        }
+        .user-info-bar .status {
+            color: #27ae60;
         }
     </style>
 </head>
 <body>
 
-<!-- Login Overlay -->
+<!-- ══════════ LOGIN OVERLAY ══════════ -->
 <div id="loginOverlay" class="login-overlay">
     <div class="login-box">
         <h2>🔒 SafeSocket Chat</h2>
-        <input type="text" id="usernameInput" placeholder="Enter username (max 20 chars)" maxlength="20">
+        <p class="subtitle">Secure Real-Time Messaging</p>
+
+        <input type="text"
+               id="usernameInput"
+               placeholder="Enter username (3–20 chars)"
+               maxlength="20"
+               autocomplete="off"
+               spellcheck="false">
+
         <button id="loginBtn">Join Secure Chat</button>
         <div id="loginError" class="error-message"></div>
-        <div class="private-hint">💡 Private message: @username message</div>
+
+        <div class="security-features">
+            <p>Active Security Controls</p>
+            <span>✅ XSS Prevention (HTML encoding)</span>
+            <span>✅ CSRF Token Protection</span>
+            <span>✅ Rate Limiting (30 msg/min)</span>
+            <span>✅ Anti-Spoofing Enforcement</span>
+            <span>✅ IDOR Access Control</span>
+            <span>✅ Input Validation (3–20 chars)</span>
+            <span>✅ Message Size Limit (10 KB)</span>
+        </div>
+
+        <div class="private-hint">💡 Private message: @username your message</div>
     </div>
 </div>
 
-<!-- Main Chat Interface -->
+<!-- ══════════ MAIN CHAT ══════════ -->
 <div class="chat" id="chatContainer" style="display:none;">
+
+    <!-- Header -->
     <div class="chat-title">
-        <h1>🔒 SafeSocket Secure Chat</h1>
+        <h1>🔒 SafeSocket Secure Chat <span class="security-badge">SECURED</span></h1>
         <figure class="avatar">
             <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/%3E%3C/svg%3E" alt="avatar">
         </figure>
         <span class="online-bullet"></span>
     </div>
+
+    <!-- User info bar -->
+    <div class="user-info-bar">
+        <span>Logged in as: <span class="username-display" id="usernameDisplay">—</span></span>
+        <span class="status">🟢 Secure Connection Active</span>
+    </div>
+
+    <!-- Messages area -->
     <div class="messages">
         <div class="messages-content"></div>
     </div>
+
+    <!-- Rate limit warning -->
+    <div class="rate-warning" id="rateWarning">⚠️ Slow down! You are sending messages too fast.</div>
+
+    <!-- Character counter -->
+    <div class="char-counter" id="charCounter">0 / 10240</div>
+
+    <!-- Message input -->
     <div class="message-box">
-        <textarea class="message-input" placeholder="Type message... (press Enter to send)" id="messageInput"></textarea>
+        <textarea class="message-input"
+                  placeholder="Type message… (Enter to send, Shift+Enter for new line)"
+                  id="messageInput"
+                  maxlength="10240"
+                  rows="2"></textarea>
         <button class="message-submit" id="sendBtn">Send</button>
     </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
 
 <script>
-    // ========== SECURE CLIENT-SIDE CODE ==========
-    
-    // DOM Elements
-    const loginOverlay = document.getElementById('loginOverlay');
-    const chatContainer = document.getElementById('chatContainer');
-    const usernameInput = document.getElementById('usernameInput');
-    const loginBtn = document.getElementById('loginBtn');
-    const loginError = document.getElementById('loginError');
-    const sendBtn = document.getElementById('sendBtn');
-    const messageInput = document.getElementById('messageInput');
+    // ══════════════════════════════════════════════════════
+    // SafeSocket — Secure Client
+    // Member 2: Secure Developer — Deliverable 1
+    // Security Controls: XSS, CSRF, Rate Limit, Anti-Spoof,
+    //                    IDOR, Input Validation, Size Limit
+    // ══════════════════════════════════════════════════════
+
+    // ── DOM refs ──────────────────────────────────────────
+    const loginOverlay    = document.getElementById('loginOverlay');
+    const chatContainer   = document.getElementById('chatContainer');
+    const usernameInput   = document.getElementById('usernameInput');
+    const loginBtn        = document.getElementById('loginBtn');
+    const loginError      = document.getElementById('loginError');
+    const sendBtn         = document.getElementById('sendBtn');
+    const messageInput    = document.getElementById('messageInput');
     const messagesContent = document.querySelector('.messages-content');
-    
-    let socket = null;
+    const charCounter     = document.getElementById('charCounter');
+    const rateWarning     = document.getElementById('rateWarning');
+    const usernameDisplay = document.getElementById('usernameDisplay');
+
+    // ── State ─────────────────────────────────────────────
+    let socket          = null;
     let currentUsername = null;
-    let csrfToken = null;
-    let isConnected = false;
-    
-    // ========== XSS PREVENTION: Sanitize input ==========
+    let csrfToken       = null;
+
+    // ── Constants ─────────────────────────────────────────
+    const MAX_MSG_SIZE  = 10240;   // SRD-019: 10 KB
+    const MIN_UN_LEN    = 3;
+    const MAX_UN_LEN    = 20;
+
+    // ══════════════════════════════════════════════════════
+    // SRD-006: XSS Prevention — sanitize before DOM insert
+    // ══════════════════════════════════════════════════════
     function sanitizeInput(input) {
-        if (!input) return '';
-        if (typeof input !== 'string') return '';
+        if (!input || typeof input !== 'string') return '';
         const div = document.createElement('div');
         div.textContent = input;
         return div.innerHTML;
     }
-    
-    // ========== CSRF TOKEN HANDLING ==========
-    function getCsrfToken() {
-        return csrfToken;
+
+    // ══════════════════════════════════════════════════════
+    // Validate username: alphanumeric + _ - only
+    // SRD-005, SRD-021
+    // ══════════════════════════════════════════════════════
+    function validateUsername(name) {
+        if (!name || typeof name !== 'string') return false;
+        if (name.length < MIN_UN_LEN || name.length > MAX_UN_LEN) return false;
+        return /^[a-zA-Z0-9_-]+$/.test(name);
     }
-    
-    // ========== ADD MESSAGE TO CHAT (With XSS protection) ==========
-    function addMessageToChat(username, message, isPrivate = false) {
-        const sanitizedUsername = sanitizeInput(username);
-        const sanitizedMessage = sanitizeInput(message);
-        
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'message';
-        
-        if (currentUsername === sanitizedUsername) {
-            messageDiv.classList.add('my-message');
+
+    // ══════════════════════════════════════════════════════
+    // Add message to chat window
+    // ══════════════════════════════════════════════════════
+    function addMessageToChat(username, message, type = 'public') {
+        const safeUser = sanitizeInput(username);
+        const safeMsg  = sanitizeInput(message);
+
+        const div = document.createElement('div');
+        div.className = 'message';
+
+        if (type === 'system') {
+            div.classList.add('system-message');
+        } else if (type === 'private') {
+            div.classList.add('private-message');
+        } else if (safeUser === sanitizeInput(currentUsername)) {
+            div.classList.add('my-message');
         }
-        
-        let displayName = sanitizedUsername;
-        if (isPrivate) {
-            displayName = '🔒 ' + sanitizedUsername;
-        }
-        
-        messageDiv.innerHTML = `
-            <div class="message-username">${displayName}</div>
-            <div class="message-text">${sanitizedMessage}</div>
-        `;
-        
-        messagesContent.appendChild(messageDiv);
-        
-        // Scroll to bottom
-        const messagesDiv = document.querySelector('.messages');
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+        const label = type === 'private' ? '🔒 ' + safeUser + ' (private)' : safeUser;
+
+        div.innerHTML =
+            '<div class="message-username">' + label + '</div>' +
+            '<div class="message-text">' + safeMsg + '</div>';
+
+        messagesContent.appendChild(div);
+
+        // Auto-scroll to latest
+        const msgArea = document.querySelector('.messages');
+        msgArea.scrollTop = msgArea.scrollHeight;
     }
-    
-    // ========== CONNECT TO SECURE SOCKET ==========
+
+    // ══════════════════════════════════════════════════════
+    // Connect socket
+    // ══════════════════════════════════════════════════════
     function connectSocket() {
         socket = io({
-            transports: ['websocket'],  // WebSocket only - more secure
+            transports: ['websocket'],
             reconnectionAttempts: 3,
             timeout: 10000
         });
-        
+
         // Receive CSRF token from server
         socket.on('csrf_token', (token) => {
             csrfToken = token;
-            console.log('✅ CSRF token received');
         });
-        
+
         socket.on('connect', () => {
-            console.log('✅ Connected securely to server');
-            isConnected = true;
+            console.log('[SafeSocket] Secure connection established');
         });
-        
-        socket.on('connect_error', (error) => {
-            console.error('Connection error:', error);
+
+        socket.on('connect_error', () => {
             loginError.textContent = 'Connection failed. Please refresh the page.';
         });
-        
-        // Receive public messages
+
+        // Public message received
         socket.on('updatechat', (username, message) => {
-            addMessageToChat(username, message);
+            addMessageToChat(username, message, 'public');
         });
-        
-        // Receive private messages
+
+        // Private message received
         socket.on('msg_user_handle', (fromUser, message) => {
-            addMessageToChat(fromUser, message, true);
+            addMessageToChat(fromUser, message, 'private');
         });
-        
-        // Handle server errors
-        socket.on('error', (errorMessage) => {
-            console.error('Server error:', errorMessage);
-            alert('⚠️ Security Error: ' + errorMessage);
+
+        // Server error
+        socket.on('error', (errMsg) => {
+            console.warn('[SafeSocket] Server error:', errMsg);
+
+            // Rate limit warning
+            if (errMsg.includes('Rate limit')) {
+                rateWarning.style.display = 'block';
+                setTimeout(() => { rateWarning.style.display = 'none'; }, 3000);
+            } else {
+                alert('Security notice: ' + errMsg);
+            }
         });
-        
-        // Confirm user was stored
+
+        // Login confirmed
         socket.on('store_username', (username) => {
             currentUsername = username;
+            usernameDisplay.textContent = username;
             loginOverlay.style.display = 'none';
             chatContainer.style.display = 'block';
-            addMessageToChat('🔒 System', 'Welcome ' + username + '! Your connection is secure with CSRF protection.');
+            addMessageToChat('System',
+                'Welcome ' + username + '! Connection is secure. ' +
+                'Send private messages with @username your message.',
+                'system');
         });
     }
-    
-    // ========== LOGIN WITH CSRF TOKEN ==========
+
+    // ══════════════════════════════════════════════════════
+    // Login
+    // ══════════════════════════════════════════════════════
     function login() {
-        let username = usernameInput.value.trim();
-        
-        // Input validation
-        if (!username) {
-            loginError.textContent = 'Please enter a username';
+        const raw = usernameInput.value.trim();
+        loginError.textContent = '';
+
+        // SRD-005, SRD-021: Validate before anything else
+        if (!raw) {
+            loginError.textContent = 'Please enter a username.';
             return;
         }
-        
-        if (username.length > 20) {
-            loginError.textContent = 'Username too long (max 20 characters)';
+        if (!validateUsername(raw)) {
+            loginError.textContent =
+                'Username must be 3–20 characters and contain only letters, numbers, _ or -.';
             return;
         }
-        
-        if (username.length < 3) {
-            loginError.textContent = 'Username must be at least 3 characters';
-            return;
-        }
-        
-        // Sanitize username
-        username = sanitizeInput(username);
-        
-        // Connect to server
+
         connectSocket();
-        
-        // Wait for CSRF token then send login
+
+        // Wait for CSRF token before emitting adduser
         const waitForToken = setInterval(() => {
             if (csrfToken) {
                 clearInterval(waitForToken);
-                socket.emit('adduser', username, csrfToken);
+                socket.emit('adduser', raw, csrfToken);
             }
         }, 100);
-        
-        // Timeout
+
         setTimeout(() => {
             if (!csrfToken) {
+                clearInterval(waitForToken);
                 loginError.textContent = 'Connection timeout. Please refresh.';
             }
         }, 5000);
     }
-    
-    // ========== SEND MESSAGE WITH CSRF TOKEN (FIXED - NO DUPLICATES) ==========
+
+    // ══════════════════════════════════════════════════════
+    // Send message
+    // SRD-019: 10 KB size limit enforced client-side too
+    // ══════════════════════════════════════════════════════
     function sendMessage() {
-        let message = messageInput.value.trim();
-        
+        const message = messageInput.value.trim();
+
         if (!message) return;
+
         if (!socket || !currentUsername) {
-            alert('Not connected to chat');
+            alert('Not connected to chat.');
             return;
         }
+
         if (!csrfToken) {
-            alert('Security token not ready. Please wait.');
+            alert('Security token not ready. Please wait a moment.');
             return;
         }
-        
-        // Check for private message (@username message)
-        const privateMatch = message.match(/^@(\S+)\s+(.+)$/);
-        
-        if (privateMatch) {
-            const targetUser = sanitizeInput(privateMatch[1]);
-            const privateMsg = sanitizeInput(privateMatch[2]);
-            
-            // Send private message - NO local add (server will broadcast back)
-            socket.emit('msg_user', targetUser, currentUsername, privateMsg, csrfToken);
-            // Message will appear when server sends msg_user_handle event
-        } else {
-            // Public message - NO local add (server will broadcast back)
-            const sanitizedMessage = sanitizeInput(message);
-            socket.emit('sendchat', sanitizedMessage, csrfToken);
-            // Message will appear when server sends updatechat event
+
+        // SRD-019: Client-side size check (server also enforces this)
+        if (message.length > MAX_MSG_SIZE) {
+            alert('Message too large. Maximum size is 10 KB.');
+            return;
         }
-        
-        // Clear input field
+
+        // Check for private message: @username message
+        const privateMatch = message.match(/^@(\S+)\s+(.+)$/);
+
+        if (privateMatch) {
+            const targetUser = privateMatch[1];
+            const privateMsg = privateMatch[2];
+
+            if (!validateUsername(targetUser)) {
+                alert('Invalid target username.');
+                return;
+            }
+
+            socket.emit('msg_user', targetUser, currentUsername, privateMsg, csrfToken);
+        } else {
+            socket.emit('sendchat', message, csrfToken);
+        }
+
         messageInput.value = '';
+        charCounter.textContent = '0 / 10240';
+        charCounter.className = 'char-counter';
     }
-    
-    // ========== EVENT LISTENERS ==========
+
+    // ══════════════════════════════════════════════════════
+    // Character counter (visual feedback for SRD-019)
+    // ══════════════════════════════════════════════════════
+    messageInput.addEventListener('input', () => {
+        const len = messageInput.value.length;
+        charCounter.textContent = len + ' / ' + MAX_MSG_SIZE;
+
+        if (len > MAX_MSG_SIZE * 0.9) {
+            charCounter.className = 'char-counter danger';
+        } else if (len > MAX_MSG_SIZE * 0.7) {
+            charCounter.className = 'char-counter warning';
+        } else {
+            charCounter.className = 'char-counter';
+        }
+    });
+
+    // ══════════════════════════════════════════════════════
+    // Event Listeners
+    // ══════════════════════════════════════════════════════
     loginBtn.addEventListener('click', login);
-    
+
     usernameInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') login();
     });
-    
+
     sendBtn.addEventListener('click', sendMessage);
-    
+
     messageInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         }
     });
-    
-    // Disable right-click for extra security (optional)
-    document.addEventListener('contextmenu', (e) => {
-        // Uncomment to disable right-click
-        // e.preventDefault();
-    });
-    
-    console.log('%c🔒 SafeSocket Secure Chat - All security features active', 'color: #2c8392; font-size: 14px;');
-    console.log('✅ XSS Protection: Active');
-    console.log('✅ CSRF Protection: Active');
-    console.log('✅ Secure WebSocket: Active');
+
+    // ══════════════════════════════════════════════════════
+    // Security status log
+    // ══════════════════════════════════════════════════════
+    console.log('%c🔒 SafeSocket — Secure Developer (Member 2)', 'color:#2c8392;font-size:14px;font-weight:bold');
+    console.log('%c✅ XSS Prevention      : HTML encoding on all input', 'color:#27ae60');
+    console.log('%c✅ CSRF Protection     : Token-per-session enforced', 'color:#27ae60');
+    console.log('%c✅ Input Validation    : 3–20 chars, alphanumeric', 'color:#27ae60');
+    console.log('%c✅ Message Size Limit  : 10 KB max (SRD-019)', 'color:#27ae60');
+    console.log('%c✅ Rate Limit Feedback : Server-enforced 30 msg/min', 'color:#27ae60');
+    console.log('%c✅ Anti-Spoofing       : Identity bound to socket', 'color:#27ae60');
 </script>
 </body>
 </html>
